@@ -89,7 +89,7 @@ def get_install_requires():
 
 def get_packages():
     return [name
-            for _, name, ispkg in walk_packages(".")
+            for _, name, ispkg in walk_packages(["."])
             if name.startswith("fluxclient") and ispkg]
 
 
@@ -111,7 +111,12 @@ def get_entry_points():
 
 def get_default_extra_compile_args():
     if is_darwin():
-        return ["--stdlib=libc++", "-std=c++11", "-mmacosx-version-min=10.9"]
+        return [
+            "-stdlib=libc++", 
+            "-std=c++11",
+            "-arch", "arm64",  # Explicitly specify arm64 architecture
+            "-mmacosx-version-min=11.0"  # Updated minimum macOS version
+        ]
     elif is_linux():
         return ["-lstdc++", "-std=c++11"]
     elif is_windows():
@@ -141,6 +146,23 @@ def create_utils_extentions():
             extra_compile_args=get_default_extra_compile_args())
     ]
 
+def verify_pcl_headers(include_dirs):
+    """Verify that PCL headers exist in the specified include directories."""
+    header_found = False
+    for inc_dir in include_dirs:
+        header_path = os.path.join(inc_dir, "pcl/io/pcd_io.h")
+        if os.path.exists(header_path):
+            header_found = True
+            break
+    
+    if not header_found:
+        raise RuntimeError(f"PCL headers not found in any of: {include_dirs}")
+
+def is_apple_silicon():
+    if not is_darwin():
+        return False
+    return platform.machine() == 'arm64'
+
 
 def create_pcl_extentions():
     # Process include_dirs
@@ -152,30 +174,95 @@ def create_pcl_extentions():
     library_dirs = []
 
     try:
+        # if is_darwin():
+        #     homebrew_prefix = "/opt/homebrew"
+        #     try:
+        #         include_dirs += [locate_includes("flann")]
+        #     except RuntimeError:
+        #         sys.stderr.write("library flann not found, its may cause "
+        #                          "compile issue in some environ.")
+
+        #     if not os.path.exists("/usr/local/include/boost"):
+        #         raise RuntimeError("boost lib include not found at "
+        #                            "/usr/local/include/boost/")
         if is_darwin():
-            try:
-                include_dirs += [locate_includes("flann")]
-            except RuntimeError:
-                sys.stderr.write("library flann not found, its may cause "
-                                 "compile issue in some environ.")
+            # Base paths
+            homebrew_prefix = "/opt/homebrew"
+            pcl_base = f"{homebrew_prefix}/Cellar/pcl/1.14.1_3"
+            
+            # Add include directories as separate entries
+            include_dirs.extend([
+                f"{pcl_base}/include/pcl-1.14",  # Main PCL includes
+                f"{homebrew_prefix}/Cellar/eigen/3.4.0_1/include/eigen3",  # Eigen
+                f"{homebrew_prefix}/include",  # Homebrew general includes
+                f"{homebrew_prefix}/include/eigen3",  # Alternative Eigen location
+                f"{homebrew_prefix}/opt/vtk@9.2/include/vtk-9.2",  # VTK includes
+                f"{homebrew_prefix}/opt/boost/include",  # Boost includes
+                f"{homebrew_prefix}/opt/flann/include"  # FLANN includes
+            ])
 
-            if not os.path.exists("/usr/local/include/boost"):
-                raise RuntimeError("boost lib include not found at "
-                                   "/usr/local/include/boost/")
+            # Add library directories
+            library_dirs.extend([
+                f"{pcl_base}/lib",
+                f"{homebrew_prefix}/lib",
+                f"{homebrew_prefix}/opt/vtk@9.2/lib",
+                f"{homebrew_prefix}/opt/boost/lib",
+                f"{homebrew_prefix}/opt/flann/lib"
+            ])
+            
+            # Required libraries
+            libraries.extend([
+                "pcl_common",
+                "pcl_io",
+                "pcl_octree",
+                "pcl_kdtree",
+                "pcl_search",
+                "pcl_sample_consensus",
+                "pcl_filters",
+                "pcl_features",
+                "pcl_segmentation",
+                "pcl_surface",
+                "pcl_registration",
+                "pcl_keypoints",
+                "boost_system",
+                "boost_filesystem",
+                "flann_cpp"
+            ])
 
-        if is_posix():
+            # Add extra compile args specific to macOS ARM64
+            extra_compile_args.extend([
+                "-Wno-deprecated-declarations",
+                "-DvtkRenderingCore_AUTOINIT=1(vtkInteractionStyle)",
+                "-DBOOST_UUID_RANDOM_PROVIDER_FORCE_POSIX"
+            ])
+
+            # Debug print statements
+            print("Include directories:", include_dirs)
+            print("Library directories:", library_dirs)
+            print("Libraries:", libraries)
+
+            # Verify PCL headers exist
+            verify_pcl_headers(include_dirs)
+
+        if is_posix() and not is_darwin():
             include_dirs += [locate_includes("eigen3")]
 
             libraries += ["pcl_common", "pcl_octree", "pcl_io", "pcl_kdtree",
                           "pcl_search", "pcl_sample_consensus", "pcl_filters",
                           "pcl_features", "pcl_segmentation", "pcl_surface",
                           "pcl_registration", "pcl_keypoints"]
+            if has_package("pcl_common-1.14"):  # Try newer version first
+                include_dirs += [locate_includes("pcl_common-1.14")]
+                library_dirs += [locate_library("pcl_common-1.14")]
             if has_package("pcl_common-1.8"):
                 include_dirs += [locate_includes("pcl_common-1.8")]
                 library_dirs += [locate_library("pcl_common-1.8")]
             elif has_package("pcl_common-1.7"):
                 include_dirs += [locate_includes("pcl_common-1.7")]
                 library_dirs += [locate_library("pcl_common-1.7")]
+            elif has_package("pcl_common"):
+                include_dirs += [locate_includes("pcl_common")]
+                library_dirs += [locate_library("pcl_common")]
             else:
                 raise RuntimeError("Can not locate pcl includes.")
         elif is_windows():
@@ -257,7 +344,7 @@ def create_pcl_extentions():
         libraries=libraries,
         library_dirs=library_dirs,
         extra_objects=[],
-        include_dirs=include_dirs
+        include_dirs=include_dirs + [numpy.get_include()]
     ))
     extensions.append(Extension(
         'fluxclient.printer._printer',
